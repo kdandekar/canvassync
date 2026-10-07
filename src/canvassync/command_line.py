@@ -97,6 +97,12 @@ class SyncCommand(Command):
             "--canvas-api-key",
             help="Canvas API key; overrides api_key from the config file",
         )
+        parser.add_argument(
+            "--course-id",
+            type=int,
+            help="Canvas course ID; overrides course_id and course_sis from "
+            "the config file (e.g., to target a sandbox course)",
+        )
 
         #
         # Subparsers for individual commands
@@ -126,6 +132,19 @@ class SyncCommand(Command):
             "sync", help="Synchronize with Canvas"
         )
         sync_parser.add_argument("--limit", action="append", default=None)
+        sync_parser.add_argument(
+            "--create-assignments",
+            action="store_true",
+            default=False,
+            help="create assignments that do not exist in Canvas",
+        )
+        sync_parser.add_argument(
+            "--replace-quizzes",
+            action="store_true",
+            default=False,
+            help="re-import quizzes whose QTI zip changed (only quizzes "
+            "without student submissions)",
+        )
         sync_parser.set_defaults(func=self.sync)
 
         #
@@ -168,6 +187,7 @@ class SyncCommand(Command):
                     args.config,
                     root=args.root,
                     api_key=args.api_key,
+                    course_id=args.course_id,
                 )
             except yaml.YAMLError as exc:
                 print(exc, file=sys.stderr)
@@ -188,8 +208,20 @@ class SyncCommand(Command):
                 print(f"{indent:}{item.title:} ({item.type:})")
 
     def sync(self, args: Namespace) -> None:
+        if args.dry_run:
+            print(
+                "[yellow]--dry-run is not implemented for sync; "
+                "changes will be made to Canvas[/yellow]",
+                file=sys.stderr,
+            )
+
+        sync_kwargs = {
+            "create_assignments": args.create_assignments,
+            "replace_quizzes": args.replace_quizzes,
+        }
+
         if args.quiet:
-            self.sync_obj.sync(limits=args.limit)
+            self.sync_obj.sync(limits=args.limit, **sync_kwargs)
             return
 
         console = Console()
@@ -210,6 +242,7 @@ class SyncCommand(Command):
             self.sync_obj.sync(
                 limits=args.limit,
                 status_callback=update_status,
+                **sync_kwargs,
             )
 
     def render(self, args: Namespace) -> None:
