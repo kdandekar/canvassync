@@ -5,6 +5,7 @@ import logging
 import re
 import sys
 import time
+from urllib.parse import urlparse
 from collections.abc import Callable
 from contextlib import ExitStack
 from functools import cached_property
@@ -568,9 +569,7 @@ class CanvasSync:
 
             if group is None:
                 logging.debug("Creating assignment group '%s'", name)
-                group = self.course.create_assignment_group(
-                    name=name, **attrs
-                )
+                group = self.course.create_assignment_group(name=name, **attrs)
                 self.assignment_groups[name] = group
             elif attrs:
                 logging.debug("Updating assignment group '%s'", name)
@@ -1169,8 +1168,7 @@ class CanvasSync:
 
         def differs(attr: str, value: Any) -> bool:
             return (
-                assignment is None
-                or getattr(assignment, attr, None) != value
+                assignment is None or getattr(assignment, attr, None) != value
             )
 
         attrs: ConfigDict = {}
@@ -1409,11 +1407,16 @@ class CanvasSync:
         if 300 <= response.status_code < 400:
             location = response.headers["Location"]
             logging.debug("Confirming upload at %s", location)
-            response = requests.get(
-                location,
-                headers={"Authorization": f"Bearer {self.api_key:}"},
-                timeout=60,
+            # Only send the API token back to the Canvas host itself.
+            same_host = (
+                urlparse(location).netloc == urlparse(self.api_url).netloc
             )
+            headers = (
+                {"Authorization": f"Bearer {self.api_key:}"}
+                if same_host
+                else {}
+            )
+            response = requests.get(location, headers=headers, timeout=60)
 
         if not response.ok:
             raise ValueError(
