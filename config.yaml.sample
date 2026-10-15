@@ -93,4 +93,10 @@ modules:
         submission_types: [online_upload]
         allowed_extensions: [pdf]
         assignment_group: Project
+        # YAML rubric file; see README.md for the format.
+        rubric: rubrics/proposal.yaml
+        peer_reviews:
+          anonymous: true
+          automatic: true
+          count: 2
         due_at: "1/19/2026 11:59pm"

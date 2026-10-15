@@ -65,7 +65,7 @@ Global options:
 Common commands:
 
 - `courses`: list courses visible to the Canvas API token.
-- `sync`: synchronize the configured assignment groups, syllabus, modules, pages, files, URLs, and assignments.
+- `sync`: synchronize the configured assignment groups, syllabus, modules, pages, files, URLs, assignments, and rubrics.
 - `sync --limit TEXT`: synchronize only modules whose names match `TEXT`. Repeat `--limit` to match more than one module.
 - `sync --create-assignments`: create assignments referenced with `assignment:` that do not exist in Canvas, instead of exiting with an error. Equivalent to `create_assignments: true` in the config.
 - `render PATH`: render one Markdown file to HTML without updating Canvas pages or modules. Local images may still be uploaded during rendering.
@@ -85,7 +85,7 @@ Note the following:
 - Extra Canvas module items after the configured items may be deleted.
 - Assignments referenced with `assignment:` must already exist in Canvas unless `--create-assignments` (or `create_assignments: true`) is given.
 - Assignment groups are created and updated, but never deleted.
-- Local files referenced with `file:`, `page:`, `description:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
+- Local files referenced with `file:`, `page:`, `description:`, `rubric:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
 - Run `sync --limit TEXT` first when testing changes to one module.
 
 ### Canvas API access token
@@ -193,6 +193,8 @@ Assignment items accept these settings. They are applied when an assignment is c
 - `allowed_extensions`: list of file extensions allowed for `online_upload`, such as `[pdf, ipynb]`.
 - `grading_type`: `points`, `percent`, `pass_fail`, `letter_grade`, `gpa_scale`, or `not_graded`.
 - `assignment_group`: name of an assignment group. It must exist in Canvas or be listed under `assignment_groups`.
+- `peer_reviews`: enables peer reviews when present. A mapping with `anonymous` (default `false`), `automatic` (default `false`), and `count` (number of reviews per student, used when `automatic` is `true`).
+- `rubric`: path to a YAML rubric file. See [Rubrics](#rubrics).
 - `published`: the item's `published` flag also sets the assignment's published state when the assignment is created.
 
 When `--create-assignments` is given and no assignment matches, CanvasSync creates one named by the `assignment` value (or the item `title` if `assignment` is not a string), with the settings above:
@@ -215,6 +217,11 @@ When `--create-assignments` is given and no assignment matches, CanvasSync creat
   submission_types: [online_upload]
   allowed_extensions: [pdf]
   assignment_group: Project
+  rubric: rubrics/proposal.yaml
+  peer_reviews:
+    anonymous: true
+    automatic: true
+    count: 2
 ```
 
 Assignments are looked up by the item `title` first, then by the `assignment` name.
@@ -240,6 +247,35 @@ assignment_groups:
 ```
 
 Each group supports `name` (required), `position`, `group_weight` (percent, used when `apply_assignment_group_weights` is `true`), `drop_lowest`, and `drop_highest`.
+
+### Rubrics
+
+An assignment item's `rubric` key names a YAML rubric file:
+
+```yaml
+title: "Project Proposal Rubric"
+free_form_criterion_comments: false   # optional, default false
+use_for_grading: true                 # optional, default false
+criteria:
+  - description: "Problem statement"
+    long_description: "Clear, specific, and motivated"   # optional
+    ratings:
+      - {points: 10, description: "Excellent"}
+      - {points: 5, description: "Adequate", long_description: "Vague in places"}
+      - {points: 0, description: "Missing"}
+  - description: "Writing"
+    ratings:
+      - {points: 5, description: "Clear"}
+      - {points: 0, description: "Unclear"}
+```
+
+Each criterion is worth the maximum points of its ratings.
+
+CanvasSync finds a course rubric with exactly the same `title`:
+
+- If there is none, it creates the rubric and associates it with the assignment for grading.
+- If it exists but is not associated with the assignment, it associates it.
+- If its content differs from the YAML file, CanvasSync prints a warning and does **not** update it, because rubrics that have been used for assessments must not change silently. Edit the rubric in Canvas, or give the YAML rubric a new title to create a new one.
 
 ### Testing in a sandbox course
 
