@@ -45,3 +45,21 @@ def make_sync(tmp_path: Path) -> MakeSync:
         return sync
 
     return factory
+
+
+@pytest.fixture
+def course() -> MagicMock:
+    """A mocked Canvas course with no content."""
+    course = MagicMock(name="course")
+    course.id = 999
+    course.get_assignments.return_value = []
+    course.get_assignment_groups.return_value = []
+    return course
+
+
+def obj(**attrs: Any) -> MagicMock:
+    """Create a mock Canvas object with the given attributes only."""
+    mock = MagicMock(spec=list(attrs) + ["edit", "delete"])
+    for key, value in attrs.items():
+        setattr(mock, key, value)
+    return mock

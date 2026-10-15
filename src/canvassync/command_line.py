@@ -133,6 +133,12 @@ class SyncCommand(Command):
             "sync", help="Synchronize with Canvas"
         )
         sync_parser.add_argument("--limit", action="append", default=None)
+        sync_parser.add_argument(
+            "--create-assignments",
+            action="store_true",
+            default=False,
+            help="create assignments that do not exist in Canvas",
+        )
         sync_parser.set_defaults(func=self.sync)
 
         #
@@ -212,8 +218,12 @@ class SyncCommand(Command):
                 file=sys.stderr,
             )
 
+        sync_kwargs = {
+            "create_assignments": args.create_assignments,
+        }
+
         if args.quiet:
-            self.sync_obj.sync(limits=args.limit)
+            self.sync_obj.sync(limits=args.limit, **sync_kwargs)
             return
 
         console = Console()
@@ -232,6 +242,7 @@ class SyncCommand(Command):
             self.sync_obj.sync(
                 limits=args.limit,
                 status_callback=update_status,
+                **sync_kwargs,
             )
 
     def render(self, args: Namespace) -> None:

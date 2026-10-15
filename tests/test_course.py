@@ -73,6 +73,7 @@ def test_cli_passes_course_id_and_sync_flags(
             "--config",
             str(config),
             "sync",
+            "--create-assignments",
             "--limit",
             "Week 1",
         ],
@@ -85,7 +86,7 @@ def test_cli_passes_course_id_and_sync_flags(
         config, root=None, api_key=None, course_id=12345
     )
     canvas_sync.return_value.sync.assert_called_once_with(
-        limits=["Week 1"]
+        limits=["Week 1"], create_assignments=True
     )
 
 
@@ -105,5 +106,5 @@ def test_cli_flags_default_off(
 
     assert canvas_sync.call_args.kwargs["course_id"] is None
     canvas_sync.return_value.sync.assert_called_once_with(
-        limits=None
+        limits=None, create_assignments=False
     )
