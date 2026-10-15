@@ -1,4 +1,5 @@
 import datetime
+import html
 import importlib.resources
 import logging
 import re
@@ -26,6 +27,7 @@ from canvasapi.page import Page
 from canvasapi.rubric import Rubric
 from jinja2 import Environment, FileSystemLoader
 from rich import print
+from rich.markup import escape
 
 TextSource: TypeAlias = Path | str
 """A text source.
@@ -254,6 +256,15 @@ def rubric_payload(rubric: ConfigDict) -> ConfigDict:
     }
 
 
+def _rubric_text(value: Any) -> str:
+    """Normalize rubric text for comparison.
+
+    Canvas stores rubric text as HTML, so quotes and ampersands may come back
+    as entities, and whitespace may change.
+    """
+    return " ".join(html.unescape(str(value or "")).split())
+
+
 def _rubric_signature(
     free_form: bool, criteria: list[ConfigDict]
 ) -> tuple[Any, ...]:
@@ -262,14 +273,14 @@ def _rubric_signature(
         bool(free_form),
         tuple(
             (
-                criterion.get("description") or "",
-                criterion.get("long_description") or "",
+                _rubric_text(criterion.get("description")),
+                _rubric_text(criterion.get("long_description")),
                 float(criterion.get("points") or 0),
                 tuple(
                     (
                         float(rating.get("points") or 0),
-                        rating.get("description") or "",
-                        rating.get("long_description") or "",
+                        _rubric_text(rating.get("description")),
+                        _rubric_text(rating.get("long_description")),
                     )
                     for rating in criterion.get("ratings") or []
                 ),
@@ -279,18 +290,49 @@ def _rubric_signature(
     )
 
 
-def rubric_differs(rubric: ConfigDict, canvas_rubric: Rubric) -> bool:
-    """Determine whether a Canvas rubric's content differs from a config."""
-    config_sig = _rubric_signature(
+def rubric_differences(rubric: ConfigDict, canvas_rubric: Rubric) -> list[str]:
+    """Describe how a Canvas rubric's content differs from a config.
+
+    Returns:
+        list[str]: Human-readable differences; empty if the content matches.
+    """
+    config_free, config_criteria = _rubric_signature(
         rubric.get("free_form_criterion_comments", False),
         rubric_criteria(rubric),
     )
-    canvas_sig = _rubric_signature(
+    canvas_free, canvas_criteria = _rubric_signature(
         getattr(canvas_rubric, "free_form_criterion_comments", False),
         getattr(canvas_rubric, "data", None) or [],
     )
 
-    return config_sig != canvas_sig
+    differences: list[str] = []
+
+    if config_free != canvas_free:
+        differences.append(
+            f"free-form comments: Canvas {canvas_free}, file {config_free}"
+        )
+
+    if len(config_criteria) != len(canvas_criteria):
+        differences.append(
+            f"{len(canvas_criteria)} criteria in Canvas, "
+            f"{len(config_criteria)} in the file"
+        )
+
+    for i, (ours, theirs) in enumerate(
+        zip(config_criteria, canvas_criteria, strict=False)
+    ):
+        if ours != theirs:
+            differences.append(
+                f"criterion {i + 1} ('{ours[0]}'): Canvas {theirs!r}, "
+                f"file {ours!r}"
+            )
+
+    return differences
+
+
+def rubric_differs(rubric: ConfigDict, canvas_rubric: Rubric) -> bool:
+    """Determine whether a Canvas rubric's content differs from a config."""
+    return bool(rubric_differences(rubric, canvas_rubric))
 
 
 def get_page_source(item: ModuleItemConfig) -> TextSource:
@@ -1274,11 +1316,17 @@ class CanvasSync:
             )
             return
 
-        if rubric_differs(rubric_config, rubric):
+        # The rubric list may omit criteria; fetch the full rubric to compare.
+        if getattr(rubric, "data", None) is None:
+            rubric = self.course.get_rubric(rubric.id)
+
+        differences = rubric_differences(rubric_config, rubric)
+        if differences:
+            details = "\n  ".join(escape(d) for d in differences[:3])
             print(
                 f"[yellow]Rubric '{title:}' in Canvas differs from "
                 f"'{path:}'; not updating it. Edit it in Canvas or give the "
-                "rubric a new title.[/yellow]"
+                f"rubric a new title.\n  {details}[/yellow]"
             )
 
         rubric_settings = cast(

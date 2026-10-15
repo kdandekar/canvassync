@@ -7,7 +7,12 @@ import pytest
 import yaml
 from canvasapi.util import combine_kwargs
 
-from canvassync.sync import load_rubric, rubric_differs, rubric_payload
+from canvassync.sync import (
+    load_rubric,
+    rubric_differences,
+    rubric_differs,
+    rubric_payload,
+)
 
 from .conftest import MakeSync, obj
 
@@ -159,6 +164,58 @@ def test_rubric_differs() -> None:
     assert rubric_differs(
         RUBRIC, obj(free_form_criterion_comments=False, data=canvas_data())
     )
+
+
+def test_rubric_differs_ignores_html_entities_and_whitespace() -> None:
+    config = {
+        **RUBRIC,
+        "criteria": [
+            {
+                **RUBRIC["criteria"][0],
+                "long_description": 'The "what if" & more',
+            },
+            RUBRIC["criteria"][1],
+        ],
+    }
+    data = canvas_data()
+    data[0]["long_description"] = "The &quot;what if&quot; &amp;  more "
+
+    assert not rubric_differs(
+        config, obj(free_form_criterion_comments=True, data=data)
+    )
+
+
+def test_rubric_differences_names_the_criterion() -> None:
+    changed = canvas_data()
+    changed[1]["description"] = "Style"
+
+    differences = rubric_differences(
+        RUBRIC, obj(free_form_criterion_comments=True, data=changed)
+    )
+
+    assert len(differences) == 1
+    assert "criterion 2" in differences[0]
+    assert "Style" in differences[0]
+
+
+def test_rubric_without_data_is_fetched_in_full(
+    make_sync: MakeSync, course: MagicMock, rubric_file: Path
+) -> None:
+    listed = obj(id=300, title="Project Report Rubric")
+    course.get_rubrics.return_value = [listed]
+    course.get_rubric.return_value = obj(
+        id=300,
+        title="Project Report Rubric",
+        free_form_criterion_comments=True,
+        data=canvas_data(),
+    )
+    sync = make_sync(course=course)
+    assignment = obj(id=55, name="Project Report", rubric_settings={"id": 300})
+
+    sync.sync_rubric(Path("rubrics/report.yaml"), assignment)
+
+    course.get_rubric.assert_called_once_with(300)
+    course.create_rubric.assert_not_called()
 
 
 def test_create_rubric_with_association(
