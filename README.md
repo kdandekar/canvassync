@@ -65,8 +65,9 @@ Global options:
 Common commands:
 
 - `courses`: list courses visible to the Canvas API token.
-- `sync`: synchronize the configured syllabus, modules, pages, files, URLs, and assignment metadata.
+- `sync`: synchronize the configured assignment groups, syllabus, modules, pages, files, URLs, and assignments.
 - `sync --limit TEXT`: synchronize only modules whose names match `TEXT`. Repeat `--limit` to match more than one module.
+- `sync --create-assignments`: create assignments referenced with `assignment:` that do not exist in Canvas, instead of exiting with an error. Equivalent to `create_assignments: true` in the config.
 - `render PATH`: render one Markdown file to HTML without updating Canvas pages or modules. Local images may still be uploaded during rendering.
 - `render PATH --output rendered.html`: render Markdown to an output file.
 - `roster`: print the course roster as a table.
@@ -82,7 +83,8 @@ Note the following:
 
 - Module and item order in `config.yaml` matter and are reflected in Canvas.
 - Extra Canvas module items after the configured items may be deleted.
-- Assignments referenced with `assignment:` must already exist in Canvas.
+- Assignments referenced with `assignment:` must already exist in Canvas unless `--create-assignments` (or `create_assignments: true`) is given.
+- Assignment groups are created and updated, but never deleted.
 - Local files referenced with `file:`, `page:`, `description:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
 - Run `sync --limit TEXT` first when testing changes to one module.
 
@@ -154,6 +156,9 @@ Top-level keys:
 - `api_key`: Canvas API access token. You can omit this when passing `--api-key` on the command line.
 - `course_sis`: Canvas SIS course ID to synchronize. This value may contain spaces, so quote it in YAML. Optional when `course_id` or `--course-id` is given.
 - `course_id`: optional numeric Canvas course ID (the number in the course URL, `https://canvas.example.edu/courses/12345`). When present, it is used instead of `course_sis`. `--course-id` overrides both.
+- `create_assignments`: optional; when `true`, `sync` creates missing assignments, as with `sync --create-assignments`. Defaults to `false`.
+- `assignment_groups`: optional list of assignment groups to create or update. See [Assignment groups](#assignment-groups).
+- `apply_assignment_group_weights`: optional; sets the course's "weight final grade based on assignment groups" option.
 - `pandoc_metadata`: optional metadata passed to Pandoc when rendering Markdown.
 - `vars`: optional global variables promoted directly into Jinja templates. Use `vars` for short, frequently used values that you want to reference by name, such as `{{ instructor_name }}`.
 - `data`: optional structured data available in Jinja templates as `site`. Use `data` for grouped course or site information, such as `{{ site.course.title }}`, to avoid cluttering the top-level template namespace.
@@ -173,11 +178,68 @@ Each item needs a `title` and one content key. Nested `items` become indented mo
 - `page_contents`: render inline Markdown text and create or update a Canvas page.
 - `file`: upload a local file and add it to the module.
 - `url`: add an external URL. Use `new_tab: true` to open it in a new tab.
-- `assignment`: link an existing Canvas assignment. Optional fields include `description`, `description_contents`, `points_possible`, `unlock_at`, `due_at`, and `lock_at`.
+- `assignment`: link a Canvas assignment by name. Optional fields include `description`, `description_contents`, `unlock_at`, `due_at`, `lock_at`, and the [assignment settings](#assignment-settings) below.
 - `vars`: item-specific template variables. These are available when rendering that item's `page`, `page_contents`, assignment `description`, or assignment `description_contents`, and override top-level `vars` with the same name.
 - No content key: create a Canvas module text header.
 
 Paths are resolved relative to the config file directory unless `--root` is provided.
+
+### Assignment settings
+
+Assignment items accept these settings. They are applied when an assignment is created and on every sync, but only when the Canvas value differs:
+
+- `points_possible`: number of points.
+- `submission_types`: list of submission types, such as `[online_upload]`, `[online_text_entry, online_url]`, `[on_paper]`, or `[none]`.
+- `allowed_extensions`: list of file extensions allowed for `online_upload`, such as `[pdf, ipynb]`.
+- `grading_type`: `points`, `percent`, `pass_fail`, `letter_grade`, `gpa_scale`, or `not_graded`.
+- `assignment_group`: name of an assignment group. It must exist in Canvas or be listed under `assignment_groups`.
+- `published`: the item's `published` flag also sets the assignment's published state when the assignment is created.
+
+When `--create-assignments` is given and no assignment matches, CanvasSync creates one named by the `assignment` value (or the item `title` if `assignment` is not a string), with the settings above:
+
+```yaml
+- title: "HW1: Cellular Geometry"
+  published: true
+  assignment: "HW1: Cellular Geometry"
+  description: assignments/homework.md
+  points_possible: 20
+  submission_types: [online_upload]
+  allowed_extensions: [ipynb]
+  grading_type: points
+  assignment_group: Homework
+  due_at: "1/10/2027 11:59pm"
+
+- title: "Project Proposal"
+  published: true
+  assignment: "Project Proposal"
+  submission_types: [online_upload]
+  allowed_extensions: [pdf]
+  assignment_group: Project
+```
+
+Assignments are looked up by the item `title` first, then by the `assignment` name.
+
+### Assignment groups
+
+The optional top-level `assignment_groups` list is synchronized at the start of every `sync`, before modules. Missing groups are created by name; existing groups are updated when `position`, `group_weight`, `drop_lowest`, or `drop_highest` differ. Groups are never deleted, and groups not listed are left alone.
+
+```yaml
+apply_assignment_group_weights: true
+
+assignment_groups:
+  - name: Homework
+    position: 1
+    group_weight: 40
+    drop_lowest: 1
+  - name: Quizzes
+    position: 2
+    group_weight: 20
+  - name: Project
+    position: 3
+    group_weight: 40
+```
+
+Each group supports `name` (required), `position`, `group_weight` (percent, used when `apply_assignment_group_weights` is `true`), `drop_lowest`, and `drop_highest`.
 
 ### Testing in a sandbox course
 
@@ -185,10 +247,10 @@ Use `--course-id` to run an unchanged config against a sandbox or development co
 
 ```bash
 canvas-sync --course-id 12345 --config config.yaml --api-key "$CANVAS_API_KEY" \
-  sync --limit "Week 1"
+  sync --create-assignments
 ```
 
-`--limit "Week 1"` tries a single module first. Assignments referenced with `assignment:` must already exist in the sandbox course.
+`--create-assignments` creates the assignments that exist in the production course but not in the empty sandbox. Add `--limit "Week 1"` to try a single module first.
 
 ### Finding the course SIS ID
 
