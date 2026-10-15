@@ -5,12 +5,12 @@ import logging
 import re
 import sys
 import time
-from urllib.parse import urlparse
 from collections.abc import Callable
 from contextlib import ExitStack
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
+from urllib.parse import urlparse
 
 import css_inline
 import dateutil.parser
