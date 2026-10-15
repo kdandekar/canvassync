@@ -16,6 +16,7 @@ dependencies = [
     "pandas",
     "pypandoc_binary",
     "python-dateutil",
+    "requests",
     "tzlocal",
     "css-inline",
     "rich",
@@ -31,6 +32,7 @@ dev = [
     "ruff",
     "types-PyYAML",
     "types-python-dateutil",
+    "types-requests",
 ]
 
 [tool.pytest.ini_options]

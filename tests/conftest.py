@@ -55,12 +55,13 @@ def course() -> MagicMock:
     course.get_assignments.return_value = []
     course.get_assignment_groups.return_value = []
     course.get_rubrics.return_value = []
+    course.get_quizzes.return_value = []
     return course
 
 
 def obj(**attrs: Any) -> MagicMock:
     """Create a mock Canvas object with the given attributes only."""
-    mock = MagicMock(spec=list(attrs) + ["edit", "delete"])
+    mock = MagicMock(spec=list(attrs) + ["edit", "delete", "get_submissions"])
     for key, value in attrs.items():
         setattr(mock, key, value)
     return mock

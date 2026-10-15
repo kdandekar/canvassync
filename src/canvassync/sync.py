@@ -1,9 +1,12 @@
 import datetime
+import hashlib
 import html
 import importlib.resources
 import logging
 import re
 import sys
+import time
+from urllib.parse import urlparse
 from collections.abc import Callable
 from contextlib import ExitStack
 from functools import cached_property
@@ -13,17 +16,19 @@ from typing import Any, Literal, TypeAlias, cast
 import css_inline
 import dateutil.parser
 import pypandoc
+import requests
 import tzlocal
 import yaml
 from bs4 import BeautifulSoup
 from canvasapi import Canvas
 from canvasapi.assignment import Assignment, AssignmentGroup
 from canvasapi.course import Course
-from canvasapi.exceptions import BadRequest
+from canvasapi.exceptions import BadRequest, ResourceDoesNotExist
 from canvasapi.file import File
 from canvasapi.folder import Folder
 from canvasapi.module import Module, ModuleItem
 from canvasapi.page import Page
+from canvasapi.quiz import Quiz
 from canvasapi.rubric import Rubric
 from jinja2 import Environment, FileSystemLoader
 from rich import print
@@ -142,7 +147,9 @@ def list_differs(value: list[Any], current: list[Any] | None) -> bool:
     return sorted(value) != sorted(current or [])
 
 
-ItemType = Literal["Page", "ExternalUrl", "SubHeader", "File", "Assignment"]
+ItemType = Literal[
+    "Page", "ExternalUrl", "SubHeader", "File", "Assignment", "Quiz"
+]
 
 
 def item_type(item: ModuleItemConfig) -> ItemType:
@@ -158,10 +165,60 @@ def item_type(item: ModuleItemConfig) -> ItemType:
     if "file" in item:
         return "File"
 
+    if "quiz" in item:
+        return "Quiz"
+
     if "assignment" in item:
         return "Assignment"
 
     return "SubHeader"
+
+
+SHA256_MARKER_RE = re.compile(
+    r"<p[^>]*\bdata-canvassync-sha256=\"([0-9a-fA-F]{64})\"[^>]*>\s*</p>\s*"
+)
+"""Regular expression matching the QTI sha256 marker in a quiz description."""
+
+
+def file_sha256(path: Path) -> str:
+    """Compute the hex sha256 digest of a file."""
+    digest = hashlib.sha256()
+
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def get_sha256_marker(description: str | None) -> str | None:
+    """Extract the CanvasSync sha256 marker from a quiz description.
+
+    Args:
+        description (Optional[str]): Quiz description HTML.
+
+    Returns:
+        Optional[str]: The stored sha256, or None if there is no marker.
+    """
+    if not description:
+        return None
+
+    m = SHA256_MARKER_RE.search(description)
+    if m is None:
+        return None
+
+    return m.group(1).lower()
+
+
+def set_sha256_marker(description: str | None, sha256: str) -> str:
+    """Return a quiz description with a CanvasSync sha256 marker at the end.
+
+    Any existing marker is removed first.
+    """
+    html = SHA256_MARKER_RE.sub("", description or "").rstrip()
+    marker = f'<p data-canvassync-sha256="{sha256}"></p>'
+
+    return f"{html}\n{marker}" if html else marker
 
 
 def load_rubric(path: Path) -> ConfigDict:
@@ -360,6 +417,15 @@ class CanvasSync:
     create_assignments: bool = False
     """Create assignments that do not exist in Canvas."""
 
+    replace_quizzes: bool = False
+    """Re-import quizzes whose QTI zip has changed."""
+
+    migration_timeout: float = 600.0
+    """Seconds to wait for a QTI content migration to finish."""
+
+    migration_poll_interval: float = 2.0
+    """Seconds between content migration status checks."""
+
     def __init__(
         self,
         config_path: Path,
@@ -381,6 +447,10 @@ class CanvasSync:
         self.create_assignments = bool(
             self.config.get("create_assignments", False)
         )
+
+        self._synced_quizzes: dict[str, Quiz] = {}
+        self._status_callback: Callable[[str, str | None], None] | None = None
+        self._current_module: str | None = None
 
     @property
     def api_url(self) -> str:
@@ -483,9 +553,9 @@ class CanvasSync:
 
         Canvas refuses drop rules larger than the number of assignments in a
         group, so drop rules are only applied when ``rules`` is true, which
-        :meth:`sync` does after the modules (and so the assignments) have
-        been synchronized. A group that is still too small, for example
-        during a ``--limit`` sync, gets a warning instead.
+        :meth:`sync` does after the modules (and so the assignments and
+        quizzes) have been synchronized. A group that is still too small, for
+        example during a ``--limit`` sync, gets a warning instead.
 
         Args:
             rules (bool): Apply drop rules instead of creating groups and
@@ -837,6 +907,7 @@ class CanvasSync:
         limits: list[str] | None = None,
         status_callback: Callable[[str, str | None], None] | None = None,
         create_assignments: bool | None = None,
+        replace_quizzes: bool = False,
     ) -> None:
         """Synchronize course.
 
@@ -847,9 +918,14 @@ class CanvasSync:
               module name and an optional item description.
             create_assignments (Optional[bool]): Create missing assignments.
               Defaults to the config's ``create_assignments``.
+            replace_quizzes (bool): Re-import quizzes whose QTI zip changed.
         """
         if create_assignments:
             self.create_assignments = True
+
+        self.replace_quizzes = replace_quizzes
+        self._status_callback = status_callback
+        self._synced_quizzes = {}
 
         self.sync_assignment_groups()
 
@@ -940,6 +1016,8 @@ class CanvasSync:
         if status_callback is not None:
             status_callback(module["name"], None)
 
+        self._current_module = module["name"]
+
         logging.debug("Synchronizing module '%s'", module["name"])
         course_module.edit(
             module={
@@ -993,7 +1071,12 @@ class CanvasSync:
                     logging.debug(
                         "Cannot synchronize, deleting and re-creating"
                     )
-                    course_module_item.delete()
+                    try:
+                        course_module_item.delete()
+                    except ResourceDoesNotExist:
+                        # Canvas may already have removed the item, e.g.,
+                        # when its quiz was deleted.
+                        logging.debug("Module item already deleted")
                     create = True
 
             if create:
@@ -1055,6 +1138,10 @@ class CanvasSync:
             assignment = self.sync_assignment_item(item)
 
             attrs["content_id"] = assignment.id
+        elif the_type == "Quiz":
+            quiz = self.sync_quiz_item(item)
+
+            attrs["content_id"] = quiz.id
         else:
             raise ValueError(f"Can't create item type {the_type:}")
 
@@ -1132,6 +1219,12 @@ class CanvasSync:
             assignment = self.sync_assignment_item(item)
 
             attrs["content_id"] = assignment.id
+        elif the_type == "Quiz":
+            quiz = self.sync_quiz_item(item)
+
+            # The quiz was replaced, so the module item must be re-created
+            if course_item.content_id != quiz.id:
+                return False
         else:
             raise ValueError(f"Can't handle item type {the_type:}")
 
@@ -1342,3 +1435,261 @@ class CanvasSync:
             self.course.create_rubric_association(
                 rubric_association={"rubric_id": rubric.id, **association}
             )
+
+    def get_quiz_by_title(self, title: str) -> Quiz | None:
+        """Find a course quiz with exactly this title."""
+        matches = [
+            quiz
+            for quiz in self.course.get_quizzes(search_term=title)
+            if quiz.title == title
+        ]
+
+        if len(matches) == 0:
+            return None
+
+        if len(matches) > 1:
+            print(
+                f"[yellow]Multiple quizzes are titled '{title:}'; "
+                f"using quiz {matches[0].id:}[/yellow]"
+            )
+
+        return matches[0]
+
+    def _quiz_status(self, message: str) -> None:
+        """Report quiz import progress."""
+        logging.debug("%s", message)
+
+        if self._status_callback is not None:
+            self._status_callback(self._current_module or "", message)
+
+    def upload_migration_file(
+        self, pre_attachment: ConfigDict, filepath: Path
+    ) -> None:
+        """Upload a content migration file to Canvas.
+
+        Implements Canvas's file upload flow for a migration's
+        ``pre_attachment``: a multipart POST of the upload parameters and the
+        file to the upload URL, followed by a confirmation GET if Canvas
+        redirects.
+
+        Args:
+            pre_attachment (ConfigDict): The migration's ``pre_attachment``.
+            filepath (Path): File to upload.
+        """
+        if "upload_url" not in pre_attachment:
+            message = pre_attachment.get("message", pre_attachment)
+            raise ValueError(f"Cannot upload {filepath:}: {message}")
+
+        upload_url = cast(str, pre_attachment["upload_url"])
+        upload_params = cast(
+            ConfigDict, pre_attachment.get("upload_params", {})
+        )
+
+        logging.debug("Uploading '%s' to %s", filepath, upload_url)
+
+        with filepath.open("rb") as f:
+            response = requests.post(
+                upload_url,
+                data=upload_params,
+                files={"file": (filepath.name, f)},
+                allow_redirects=False,
+                timeout=300,
+            )
+
+        if 300 <= response.status_code < 400:
+            location = response.headers["Location"]
+            logging.debug("Confirming upload at %s", location)
+            # Only send the API token back to the Canvas host itself.
+            same_host = (
+                urlparse(location).netloc == urlparse(self.api_url).netloc
+            )
+            headers = (
+                {"Authorization": f"Bearer {self.api_key:}"}
+                if same_host
+                else {}
+            )
+            response = requests.get(location, headers=headers, timeout=60)
+
+        if not response.ok:
+            raise ValueError(
+                f"Upload of {filepath:} failed with status "
+                f"{response.status_code:}: {response.text:}"
+            )
+
+    def import_qti(self, filepath: Path, title: str) -> Quiz:
+        """Import a QTI zip into the course and return the new quiz.
+
+        Args:
+            filepath (Path): Path to the QTI zip.
+            title (str): Quiz title, for progress messages.
+
+        Returns:
+            Quiz: The quiz created by the import.
+        """
+        if not filepath.exists():
+            raise FileNotFoundError(f"File '{filepath:}' does not exist")
+
+        before = {quiz.id for quiz in self.course.get_quizzes()}
+
+        self._quiz_status(f"{title} (importing QTI)")
+        migration = self.course.create_content_migration(
+            migration_type="qti_converter",
+            pre_attachment={
+                "name": filepath.name,
+                "size": filepath.stat().st_size,
+            },
+        )
+
+        self.upload_migration_file(
+            cast(ConfigDict, getattr(migration, "pre_attachment", None) or {}),
+            filepath,
+        )
+
+        start = time.monotonic()
+        state = getattr(migration, "workflow_state", None)
+
+        while True:
+            migration = self.course.get_content_migration(migration.id)
+            state = migration.workflow_state
+
+            if state in ("completed", "failed"):
+                break
+
+            elapsed = time.monotonic() - start
+            if elapsed > self.migration_timeout:
+                raise TimeoutError(
+                    f"Import of {filepath:} did not finish within "
+                    f"{self.migration_timeout:.0f}s (state: {state})"
+                )
+
+            self._quiz_status(
+                f"{title} (importing QTI: {state}, {elapsed:.0f}s)"
+            )
+            time.sleep(self.migration_poll_interval)
+
+        if state == "failed":
+            raise ValueError(f"Import of {filepath:} failed")
+
+        new_ids = [
+            quiz.id
+            for quiz in self.course.get_quizzes()
+            if quiz.id not in before
+        ]
+
+        if len(new_ids) == 0:
+            raise ValueError(f"Import of {filepath:} created no quiz")
+
+        if len(new_ids) > 1:
+            print(
+                f"[yellow]Import of {filepath:} created {len(new_ids):} "
+                f"quizzes; using quiz {new_ids[0]:}[/yellow]"
+            )
+
+        print(f"[green]Imported quiz '{title:}' from {filepath:}[/green]")
+
+        return self.course.get_quiz(new_ids[0])
+
+    def quiz_settings(
+        self, item: ModuleItemConfig, quiz: Quiz | None = None
+    ) -> ConfigDict:
+        """Compute quiz settings from an item that differ from Canvas.
+
+        Args:
+            item (ModuleItemConfig): Quiz item.
+            quiz (Optional[Quiz]): Existing quiz, or None for all settings.
+
+        Returns:
+            ConfigDict: Settings to send to Canvas.
+        """
+
+        def differs(attr: str, value: Any) -> bool:
+            return quiz is None or getattr(quiz, attr, None) != value
+
+        attrs: ConfigDict = {}
+
+        if differs("title", item["title"]):
+            attrs["title"] = item["title"]
+
+        for attr in ["time_limit", "allowed_attempts", "shuffle_answers"]:
+            if attr in item and differs(attr, item[attr]):
+                attrs[attr] = item[attr]
+
+        for date_attr in ["due_at", "unlock_at", "lock_at"]:
+            if date_attr in item and (
+                quiz is None
+                or date_differs(
+                    item[date_attr], getattr(quiz, date_attr, None)
+                )
+            ):
+                attrs[date_attr] = parse_datetime(item[date_attr]).isoformat()
+
+        if "assignment_group" in item:
+            group_id = self.get_assignment_group_id(item["assignment_group"])
+
+            if differs("assignment_group_id", group_id):
+                attrs["assignment_group_id"] = group_id
+
+        published = bool(item.get("published", False))
+        if differs("published", published):
+            attrs["published"] = published
+
+        return attrs
+
+    def sync_quiz_item(self, item: ModuleItemConfig) -> Quiz:
+        """Synchronize a Classic Quiz imported from a QTI zip.
+
+        Args:
+            item (ModuleItemConfig): Quiz item.
+
+        Returns:
+            Quiz: The synchronized quiz.
+        """
+        title = item["title"]
+
+        # A quiz may be synchronized twice when its module item is re-created
+        if title in self._synced_quizzes:
+            return self._synced_quizzes[title]
+
+        filepath: Path = self.root / Path(item["quiz"])
+        quiz = self.get_quiz_by_title(title)
+
+        if quiz is not None and self.replace_quizzes:
+            sha256 = file_sha256(filepath)
+            stored = get_sha256_marker(getattr(quiz, "description", None))
+
+            if stored != sha256:
+                if list(quiz.get_submissions()):
+                    print(
+                        f"[red]Not replacing quiz '{title:}' because it has "
+                        "student submissions[/red]",
+                        file=sys.stderr,
+                    )
+                else:
+                    logging.debug(
+                        "Replacing quiz '%s' (stored sha256 %s)", title, stored
+                    )
+                    quiz.delete()
+                    quiz = None
+
+        if quiz is None:
+            sha256 = file_sha256(filepath)
+            quiz = self.import_qti(filepath, title)
+
+            attrs = self.quiz_settings(item)
+            attrs["description"] = set_sha256_marker(
+                getattr(quiz, "description", None), sha256
+            )
+        else:
+            attrs = self.quiz_settings(item, quiz)
+
+        if attrs:
+            logging.debug(
+                "Updating quiz '%s' settings: %s",
+                title,
+                ", ".join(sorted(attrs)),
+            )
+            quiz = quiz.edit(quiz=attrs)
+
+        self._synced_quizzes[title] = quiz
+
+        return quiz

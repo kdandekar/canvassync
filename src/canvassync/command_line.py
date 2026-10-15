@@ -139,6 +139,13 @@ class SyncCommand(Command):
             default=False,
             help="create assignments that do not exist in Canvas",
         )
+        sync_parser.add_argument(
+            "--replace-quizzes",
+            action="store_true",
+            default=False,
+            help="re-import quizzes whose QTI zip changed (only quizzes "
+            "without student submissions)",
+        )
         sync_parser.set_defaults(func=self.sync)
 
         #
@@ -220,6 +227,7 @@ class SyncCommand(Command):
 
         sync_kwargs = {
             "create_assignments": args.create_assignments,
+            "replace_quizzes": args.replace_quizzes,
         }
 
         if args.quiet:
