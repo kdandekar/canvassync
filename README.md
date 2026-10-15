@@ -65,9 +65,10 @@ Global options:
 Common commands:
 
 - `courses`: list courses visible to the Canvas API token.
-- `sync`: synchronize the configured assignment groups, syllabus, modules, pages, files, URLs, assignments, and rubrics.
+- `sync`: synchronize the configured assignment groups, syllabus, modules, pages, files, URLs, assignments, rubrics, and quizzes.
 - `sync --limit TEXT`: synchronize only modules whose names match `TEXT`. Repeat `--limit` to match more than one module.
 - `sync --create-assignments`: create assignments referenced with `assignment:` that do not exist in Canvas, instead of exiting with an error. Equivalent to `create_assignments: true` in the config.
+- `sync --replace-quizzes`: re-import quizzes whose QTI zip has changed since they were imported. Quizzes with student submissions are never replaced. See [Quizzes](#quizzes).
 - `render PATH`: render one Markdown file to HTML without updating Canvas pages or modules. Local images may still be uploaded during rendering.
 - `render PATH --output rendered.html`: render Markdown to an output file.
 - `roster`: print the course roster as a table.
@@ -84,8 +85,9 @@ Note the following:
 - Module and item order in `config.yaml` matter and are reflected in Canvas.
 - Extra Canvas module items after the configured items may be deleted.
 - Assignments referenced with `assignment:` must already exist in Canvas unless `--create-assignments` (or `create_assignments: true`) is given.
+- `sync --replace-quizzes` deletes and re-imports changed quizzes that have no student submissions.
 - Assignment groups are created and updated, but never deleted.
-- Local files referenced with `file:`, `page:`, `description:`, `rubric:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
+- Local files referenced with `file:`, `page:`, `description:`, `rubric:`, `quiz:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
 - Run `sync --limit TEXT` first when testing changes to one module.
 
 ### Canvas API access token
@@ -179,6 +181,7 @@ Each item needs a `title` and one content key. Nested `items` become indented mo
 - `file`: upload a local file and add it to the module.
 - `url`: add an external URL. Use `new_tab: true` to open it in a new tab.
 - `assignment`: link a Canvas assignment by name. Optional fields include `description`, `description_contents`, `unlock_at`, `due_at`, `lock_at`, and the [assignment settings](#assignment-settings) below.
+- `quiz`: import a Canvas Classic Quiz from a QTI `.zip`. See [Quizzes](#quizzes).
 - `vars`: item-specific template variables. These are available when rendering that item's `page`, `page_contents`, assignment `description`, or assignment `description_contents`, and override top-level `vars` with the same name.
 - No content key: create a Canvas module text header.
 
@@ -276,6 +279,31 @@ CanvasSync finds a course rubric with exactly the same `title`:
 - If there is none, it creates the rubric and associates it with the assignment for grading.
 - If it exists but is not associated with the assignment, it associates it.
 - If its content differs from the YAML file, CanvasSync prints a warning and does **not** update it, because rubrics that have been used for assessments must not change silently. Edit the rubric in Canvas, or give the YAML rubric a new title to create a new one.
+
+### Quizzes
+
+A `quiz` item imports a Canvas Classic Quiz from a QTI `.zip` (for example, one exported from Canvas or produced by a QTI generator). The quiz title is the item `title`.
+
+```yaml
+- title: "Quiz 1: 5G NR"
+  published: true
+  quiz: quizzes/quiz01.zip
+  time_limit: 30          # minutes
+  allowed_attempts: 1
+  shuffle_answers: true
+  assignment_group: Quizzes
+  unlock_at: "1/4/2027 12:00am"
+  due_at: "1/10/2027 11:59pm"
+  lock_at: "1/11/2027 11:59pm"
+```
+
+Item keys: `quiz` (path to the QTI zip, required), `time_limit`, `allowed_attempts`, `shuffle_answers`, `assignment_group`, `unlock_at`, `due_at`, `lock_at`, and `published`.
+
+On sync, CanvasSync looks for a course quiz with exactly the item's title:
+
+- If there is none, it imports the zip with a Canvas content migration (`qti_converter`), waits for the import to finish, and applies the title and settings to the new quiz. It also stores a sha256 of the zip in a hidden `<p data-canvassync-sha256="...">` element at the end of the quiz description.
+- If the quiz exists, only settings that differ are updated. The quiz questions are not changed.
+- With `sync --replace-quizzes`, a quiz whose stored sha256 differs from the zip (or that has no stored sha256) is deleted and re-imported, and its module item is re-created to point at the new quiz. A quiz with student submissions is never replaced; CanvasSync prints a warning and keeps it.
 
 ### Testing in a sandbox course
 
