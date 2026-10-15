@@ -48,6 +48,7 @@ def test_create_assignment_with_settings(
         "allowed_extensions": ["ipynb"],
         "grading_type": "points",
         "assignment_group": "Homework",
+        "peer_reviews": {"anonymous": True, "automatic": True, "count": 2},
         "due_at": "1/10/2027 11:59pm",
     }
 
@@ -63,6 +64,10 @@ def test_create_assignment_with_settings(
             "submission_types": ["online_upload"],
             "allowed_extensions": ["ipynb"],
             "assignment_group_id": 7,
+            "peer_reviews": True,
+            "anonymous_peer_reviews": True,
+            "automatic_peer_reviews": True,
+            "peer_review_count": 2,
         }
     )
     # The due date is then applied by the regular sync logic
@@ -109,6 +114,9 @@ def test_existing_assignment_updates_only_differences(
         grading_type="points",
         assignment_group_id=3,
         published=False,
+        peer_reviews=False,
+        anonymous_peer_reviews=False,
+        automatic_peer_reviews=False,
     )
     course.get_assignments.return_value = [existing]
 
@@ -123,13 +131,14 @@ def test_existing_assignment_updates_only_differences(
             "allowed_extensions": ["ipynb", "pdf"],
             "grading_type": "points",
             "assignment_group": "Homework",
+            "peer_reviews": {"automatic": False},
         }
     )
 
     course.create_assignment.assert_not_called()
     # published is only applied on creation
     existing.edit.assert_called_once_with(
-        assignment={"assignment_group_id": 7}
+        assignment={"assignment_group_id": 7, "peer_reviews": True}
     )
 
 

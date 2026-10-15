@@ -23,6 +23,7 @@ from canvasapi.file import File
 from canvasapi.folder import Folder
 from canvasapi.module import Module, ModuleItem
 from canvasapi.page import Page
+from canvasapi.rubric import Rubric
 from jinja2 import Environment, FileSystemLoader
 from rich import print
 
@@ -159,6 +160,137 @@ def item_type(item: ModuleItemConfig) -> ItemType:
         return "Assignment"
 
     return "SubHeader"
+
+
+def load_rubric(path: Path) -> ConfigDict:
+    """Load and validate a YAML rubric file.
+
+    Args:
+        path (Path): Path to the rubric YAML file.
+
+    Returns:
+        ConfigDict: The rubric configuration.
+    """
+    with path.open("r", encoding="utf8") as f:
+        rubric = cast(ConfigDict, yaml.safe_load(f))
+
+    if not isinstance(rubric, dict) or "title" not in rubric:
+        raise ValueError(f"Rubric '{path:}' must have a title")
+
+    criteria = rubric.get("criteria")
+    if not isinstance(criteria, list) or len(criteria) == 0:
+        raise ValueError(f"Rubric '{path:}' must have at least one criterion")
+
+    for criterion in criteria:
+        if "description" not in criterion:
+            raise ValueError(
+                f"Rubric '{path:}' has a criterion without a description"
+            )
+
+        if not criterion.get("ratings"):
+            raise ValueError(
+                f"Rubric '{path:}' criterion "
+                f"'{criterion['description']:}' has no ratings"
+            )
+
+    return rubric
+
+
+def rubric_criteria(rubric: ConfigDict) -> list[ConfigDict]:
+    """Normalize the criteria of a rubric configuration.
+
+    The points of each criterion are the maximum points of its ratings.
+    """
+    criteria: list[ConfigDict] = []
+
+    for criterion in rubric["criteria"]:
+        ratings = [
+            {
+                "points": rating["points"],
+                "description": rating.get("description", ""),
+                "long_description": rating.get("long_description", ""),
+            }
+            for rating in criterion["ratings"]
+        ]
+
+        criteria.append(
+            {
+                "description": criterion["description"],
+                "long_description": criterion.get("long_description", ""),
+                "points": max(rating["points"] for rating in ratings),
+                "ratings": ratings,
+            }
+        )
+
+    return criteria
+
+
+def rubric_payload(rubric: ConfigDict) -> ConfigDict:
+    """Build the ``rubric`` parameter for Canvas's create rubric API.
+
+    Canvas expects criteria and ratings as hashes indexed by position,
+    e.g., ``rubric[criteria][0][ratings][0][points]``. canvasapi encodes
+    Python lists as ``[]``, so lists are converted to dictionaries with
+    string-integer keys.
+    """
+    criteria: ConfigDict = {}
+
+    for i, criterion in enumerate(rubric_criteria(rubric)):
+        criteria[str(i)] = {
+            "description": criterion["description"],
+            "long_description": criterion["long_description"],
+            "points": criterion["points"],
+            "ratings": {
+                str(j): rating for j, rating in enumerate(criterion["ratings"])
+            },
+        }
+
+    return {
+        "title": rubric["title"],
+        "free_form_criterion_comments": rubric.get(
+            "free_form_criterion_comments", False
+        ),
+        "criteria": criteria,
+    }
+
+
+def _rubric_signature(
+    free_form: bool, criteria: list[ConfigDict]
+) -> tuple[Any, ...]:
+    """Comparable representation of rubric content."""
+    return (
+        bool(free_form),
+        tuple(
+            (
+                criterion.get("description") or "",
+                criterion.get("long_description") or "",
+                float(criterion.get("points") or 0),
+                tuple(
+                    (
+                        float(rating.get("points") or 0),
+                        rating.get("description") or "",
+                        rating.get("long_description") or "",
+                    )
+                    for rating in criterion.get("ratings") or []
+                ),
+            )
+            for criterion in criteria
+        ),
+    )
+
+
+def rubric_differs(rubric: ConfigDict, canvas_rubric: Rubric) -> bool:
+    """Determine whether a Canvas rubric's content differs from a config."""
+    config_sig = _rubric_signature(
+        rubric.get("free_form_criterion_comments", False),
+        rubric_criteria(rubric),
+    )
+    canvas_sig = _rubric_signature(
+        getattr(canvas_rubric, "free_form_criterion_comments", False),
+        getattr(canvas_rubric, "data", None) or [],
+    )
+
+    return config_sig != canvas_sig
 
 
 def get_page_source(item: ModuleItemConfig) -> TextSource:
@@ -1014,6 +1146,25 @@ class CanvasSync:
             if differs("assignment_group_id", group_id):
                 attrs["assignment_group_id"] = group_id
 
+        if "peer_reviews" in item:
+            peer_reviews = cast(ConfigDict, item["peer_reviews"] or {})
+            automatic = bool(peer_reviews.get("automatic", False))
+
+            wanted: ConfigDict = {
+                "peer_reviews": True,
+                "anonymous_peer_reviews": bool(
+                    peer_reviews.get("anonymous", False)
+                ),
+                "automatic_peer_reviews": automatic,
+            }
+
+            if automatic and "count" in peer_reviews:
+                wanted["peer_review_count"] = int(peer_reviews["count"])
+
+            for attr, value in wanted.items():
+                if differs(attr, value):
+                    attrs[attr] = value
+
         return attrs
 
     def sync_assignment_item(self, item: ModuleItemConfig) -> Assignment:
@@ -1076,4 +1227,70 @@ class CanvasSync:
                 dt = parse_datetime(item[date_attr])
                 assignment.edit(assignment={date_attr: dt.isoformat()})
 
+        if "rubric" in item:
+            self.sync_rubric(Path(item["rubric"]), assignment)
+
         return assignment
+
+    def get_rubric_by_title(self, title: str) -> Rubric | None:
+        """Find a course rubric with exactly this title."""
+        for rubric in self.course.get_rubrics():
+            if rubric.title == title:
+                return rubric
+
+        return None
+
+    def sync_rubric(self, path: Path, assignment: Assignment) -> None:
+        """Synchronize a YAML rubric and associate it with an assignment.
+
+        A missing rubric is created and associated with the assignment for
+        grading. An existing rubric is associated with the assignment if it
+        isn't already. Rubric content is never updated because rubrics may
+        have assessments; a warning is printed if it differs.
+
+        Args:
+            path (Path): Rubric YAML file, relative to the root.
+            assignment (Assignment): Assignment to associate the rubric with.
+        """
+        rubric_config = load_rubric(self.root / path)
+        title = rubric_config["title"]
+        use_for_grading = bool(rubric_config.get("use_for_grading", False))
+
+        association: ConfigDict = {
+            "association_type": "Assignment",
+            "association_id": assignment.id,
+            "purpose": "grading",
+            "use_for_grading": use_for_grading,
+            "hide_score_total": False,
+        }
+
+        rubric = self.get_rubric_by_title(title)
+
+        if rubric is None:
+            logging.debug("Creating rubric '%s'", title)
+            self.course.create_rubric(
+                rubric=rubric_payload(rubric_config),
+                rubric_association=association,
+            )
+            return
+
+        if rubric_differs(rubric_config, rubric):
+            print(
+                f"[yellow]Rubric '{title:}' in Canvas differs from "
+                f"'{path:}'; not updating it. Edit it in Canvas or give the "
+                "rubric a new title.[/yellow]"
+            )
+
+        rubric_settings = cast(
+            ConfigDict, getattr(assignment, "rubric_settings", None) or {}
+        )
+
+        if rubric_settings.get("id") != rubric.id:
+            logging.debug(
+                "Associating rubric '%s' with assignment '%s'",
+                title,
+                assignment.name,
+            )
+            self.course.create_rubric_association(
+                rubric_association={"rubric_id": rubric.id, **association}
+            )

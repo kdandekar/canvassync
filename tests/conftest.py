@@ -54,6 +54,7 @@ def course() -> MagicMock:
     course.id = 999
     course.get_assignments.return_value = []
     course.get_assignment_groups.return_value = []
+    course.get_rubrics.return_value = []
     return course
 
 
