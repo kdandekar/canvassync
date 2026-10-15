@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup
 from canvasapi import Canvas
 from canvasapi.assignment import Assignment, AssignmentGroup
 from canvasapi.course import Course
-from canvasapi.exceptions import ResourceDoesNotExist
+from canvasapi.exceptions import BadRequest, ResourceDoesNotExist
 from canvasapi.file import File
 from canvasapi.folder import Folder
 from canvasapi.module import Module, ModuleItem
@@ -502,13 +502,27 @@ class CanvasSync:
 
         return cast(int, group.id)
 
-    def sync_assignment_groups(self) -> None:
+    def sync_assignment_groups(self, rules: bool = False) -> None:
         """Synchronize assignment groups and group weighting.
 
         Missing groups are created by name and existing groups are
-        updated when their position, weight, or drop rules differ.
-        Groups are never deleted.
+        updated when their position or weight differ. Groups are never
+        deleted.
+
+        Canvas refuses drop rules larger than the number of assignments in a
+        group, so drop rules are only applied when ``rules`` is true, which
+        :meth:`sync` does after the modules (and so the assignments and
+        quizzes) have been synchronized. A group that is still too small, for
+        example during a ``--limit`` sync, gets a warning instead.
+
+        Args:
+            rules (bool): Apply drop rules instead of creating groups and
+              updating positions and weights.
         """
+        if rules:
+            self.sync_assignment_group_rules()
+            return
+
         if "apply_assignment_group_weights" in self.config:
             apply = bool(self.config["apply_assignment_group_weights"])
 
@@ -530,7 +544,6 @@ class CanvasSync:
             group = self.assignment_groups.get(name)
 
             attrs: ConfigDict = {}
-            rules: ConfigDict = {}
 
             for attr in ["position", "group_weight"]:
                 if attr in group_config and (
@@ -538,6 +551,29 @@ class CanvasSync:
                     or getattr(group, attr, None) != group_config[attr]
                 ):
                     attrs[attr] = group_config[attr]
+
+            if group is None:
+                logging.debug("Creating assignment group '%s'", name)
+                group = self.course.create_assignment_group(name=name, **attrs)
+                self.assignment_groups[name] = group
+            elif attrs:
+                logging.debug("Updating assignment group '%s'", name)
+                group.edit(**attrs)
+
+    def sync_assignment_group_rules(self) -> None:
+        """Apply the configured drop rules to existing assignment groups."""
+        groups = cast(
+            list[ConfigDict], self.config.get("assignment_groups", [])
+        )
+
+        for group_config in groups:
+            name = group_config["name"]
+            group = self.assignment_groups.get(name)
+
+            if group is None:
+                continue
+
+            rules: ConfigDict = {}
 
             current_rules = (
                 cast(ConfigDict, getattr(group, "rules", None) or {})
@@ -552,28 +588,34 @@ class CanvasSync:
                 ):
                     rules[rule] = group_config[rule]
 
-            if rules:
-                # Rules not given are reset by Canvas, so send all of them.
-                attrs["rules"] = {
-                    **{
-                        k: v
-                        for k, v in current_rules.items()
-                        if k in ("drop_lowest", "drop_highest")
-                    },
-                    **{
-                        rule: group_config[rule]
-                        for rule in ["drop_lowest", "drop_highest"]
-                        if rule in group_config
-                    },
-                }
+            if not rules:
+                continue
 
-            if group is None:
-                logging.debug("Creating assignment group '%s'", name)
-                group = self.course.create_assignment_group(name=name, **attrs)
-                self.assignment_groups[name] = group
-            elif attrs:
-                logging.debug("Updating assignment group '%s'", name)
-                group.edit(**attrs)
+            # Rules not given are reset by Canvas, so send all of them.
+            all_rules = {
+                **{
+                    k: v
+                    for k, v in current_rules.items()
+                    if k in ("drop_lowest", "drop_highest")
+                },
+                **{
+                    rule: group_config[rule]
+                    for rule in ["drop_lowest", "drop_highest"]
+                    if rule in group_config
+                },
+            }
+
+            logging.debug("Setting drop rules on assignment group '%s'", name)
+            try:
+                group.edit(rules=all_rules)
+            except BadRequest as exc:
+                if "Drop rules cannot be higher" not in str(exc):
+                    raise
+                print(
+                    f"[yellow]Not setting drop rules on assignment group "
+                    f"'{name:}' yet: it has too few assignments. They are "
+                    "set by a later sync.[/yellow]"
+                )
 
     def get_folder(self, folderpath: str) -> Folder | None:
         if self._folders is None:
@@ -865,6 +907,8 @@ class CanvasSync:
                 pred=make_filter(limits),
                 status_callback=status_callback,
             )
+
+        self.sync_assignment_groups(rules=True)
 
     def sync_syllabus(self, course: Course) -> None:
         """Synchronize course syllabus."""

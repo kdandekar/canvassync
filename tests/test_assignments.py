@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from canvasapi.exceptions import BadRequest
 
 from .conftest import MakeSync, obj
 
@@ -202,15 +203,39 @@ def test_assignment_groups_create_and_update(
     course.update.assert_called_once_with(
         course={"apply_assignment_group_weights": True}
     )
-    homework.edit.assert_called_once_with(
-        group_weight=50, rules={"drop_lowest": 1}
-    )
+    # Drop rules wait until the groups have assignments (second pass)
+    homework.edit.assert_called_once_with(group_weight=50)
     course.create_assignment_group.assert_called_once_with(
-        name="Quizzes", position=2, group_weight=20, rules={"drop_lowest": 2}
+        name="Quizzes", position=2, group_weight=20
     )
     # New groups are cached for resolving names in items
     assert sync.get_assignment_group_id("Quizzes") == 8
     course.get_assignment_groups.assert_called_once()
+
+    homework.edit.reset_mock()
+    sync.sync_assignment_groups(rules=True)
+
+    homework.edit.assert_called_once_with(rules={"drop_lowest": 1})
+    quizzes.edit.assert_called_once_with(rules={"drop_lowest": 2})
+
+
+def test_assignment_group_rules_too_few_assignments_warns(
+    make_sync: MakeSync, course: MagicMock, capsys: pytest.CaptureFixture[str]
+) -> None:
+    quizzes = obj(name="Quizzes", id=8, rules={})
+    quizzes.edit.side_effect = BadRequest(
+        '{"errors":{"rules":[{"message":"Drop rules cannot be higher than '
+        'the number of assignments"}]}}'
+    )
+    course.get_assignment_groups.return_value = [quizzes]
+
+    sync = make_sync(
+        {"assignment_groups": [{"name": "Quizzes", "drop_lowest": 1}]},
+        course=course,
+    )
+    sync.sync_assignment_groups(rules=True)
+
+    assert "too few" in " ".join(capsys.readouterr().out.split())
 
 
 def test_assignment_groups_unchanged(
@@ -259,7 +284,7 @@ def test_assignment_group_rules_preserve_other_rule(
         {"assignment_groups": [{"name": "Homework", "drop_lowest": 2}]},
         course=course,
     )
-    sync.sync_assignment_groups()
+    sync.sync_assignment_groups(rules=True)
 
     homework.edit.assert_called_once_with(
         rules={"drop_lowest": 2, "drop_highest": 1}
