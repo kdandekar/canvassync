@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import yaml
+from canvasapi.exceptions import InvalidAccessToken
 from rich import print
 from rich.console import Console
 from rich.markup import escape
@@ -195,6 +196,15 @@ class SyncCommand(Command):
 
             args.func(args)
             return 0
+        except InvalidAccessToken as exc:
+            print(
+                "[red]Canvas rejected the API token: "
+                f"{escape(str(exc))}[/red]\n"
+                "Create a new one in Canvas (Account -> Settings -> New "
+                "Access Token) and pass it with --api-key.",
+                file=sys.stderr,
+            )
+            return 1
         except Exception:
             logging.exception("Error")
             return -1
@@ -228,9 +238,7 @@ class SyncCommand(Command):
 
         def update_status(module: str, item: str | None) -> None:
             if item is None:
-                status.update(
-                    f"Updating module [bold]{escape(module)}[/bold]"
-                )
+                status.update(f"Updating module [bold]{escape(module)}[/bold]")
             else:
                 status.update(
                     "Updating module "
