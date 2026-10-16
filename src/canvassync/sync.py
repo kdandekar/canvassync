@@ -285,6 +285,16 @@ def rubric_criteria(rubric: ConfigDict) -> list[ConfigDict]:
     return criteria
 
 
+def canvas_bool(value: Any) -> str:
+    """Encode a boolean form parameter as Canvas's rubric endpoints expect.
+
+    canvasapi sends Python booleans as "True"/"False", which some Canvas
+    endpoints (notably rubric creation) do not read as true; "1"/"0" is
+    understood everywhere.
+    """
+    return "1" if value else "0"
+
+
 def rubric_payload(rubric: ConfigDict) -> ConfigDict:
     """Build the ``rubric`` parameter for Canvas's create rubric API.
 
@@ -307,8 +317,8 @@ def rubric_payload(rubric: ConfigDict) -> ConfigDict:
 
     return {
         "title": rubric["title"],
-        "free_form_criterion_comments": rubric.get(
-            "free_form_criterion_comments", False
+        "free_form_criterion_comments": canvas_bool(
+            rubric.get("free_form_criterion_comments", False)
         ),
         "criteria": criteria,
     }
@@ -1498,8 +1508,8 @@ class CanvasSync:
             "association_type": "Assignment",
             "association_id": assignment.id,
             "purpose": "grading",
-            "use_for_grading": use_for_grading,
-            "hide_score_total": False,
+            "use_for_grading": canvas_bool(use_for_grading),
+            "hide_score_total": canvas_bool(False),
         }
 
         rubric = self.get_rubric_by_title(title)
