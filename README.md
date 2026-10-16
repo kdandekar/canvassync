@@ -160,6 +160,7 @@ Top-level keys:
 - `course_id`: optional numeric Canvas course ID (the number in the course URL, `https://canvas.example.edu/courses/12345`). When present, it is used instead of `course_sis`. `--course-id` overrides both.
 - `create_assignments`: optional; when `true`, `sync` creates missing assignments, as with `sync --create-assignments`. Defaults to `false`.
 - `assignment_groups`: optional list of assignment groups to create or update. See [Assignment groups](#assignment-groups).
+- `group_sets`: optional list of group sets (Canvas group categories) for group assignments. See [Group sets](#group-sets).
 - `apply_assignment_group_weights`: optional; sets the course's "weight final grade based on assignment groups" option.
 - `pandoc_metadata`: optional metadata passed to Pandoc when rendering Markdown.
 - `vars`: optional global variables promoted directly into Jinja templates. Use `vars` for short, frequently used values that you want to reference by name, such as `{{ instructor_name }}`.
@@ -196,6 +197,7 @@ Assignment items accept these settings. They are applied when an assignment is c
 - `allowed_extensions`: list of file extensions allowed for `online_upload`, such as `[pdf, ipynb]`.
 - `grading_type`: `points`, `percent`, `pass_fail`, `letter_grade`, `gpa_scale`, or `not_graded`.
 - `assignment_group`: name of an assignment group. It must exist in Canvas or be listed under `assignment_groups`.
+- `group_set`: makes it a group assignment for the named group set (one submission per group). It must exist in Canvas or be listed under `group_sets`. Add `grade_group_students_individually: true` to grade group members separately (default `false`: one grade for the group).
 - `peer_reviews`: enables peer reviews when present. A mapping with `anonymous` (default `false`), `automatic` (default `false`), and `count` (number of reviews per student, used when `automatic` is `true`).
 - `rubric`: path to a YAML rubric file. See [Rubrics](#rubrics).
 - `published`: the item's `published` flag also sets the assignment's published state when the assignment is created.
@@ -250,6 +252,20 @@ assignment_groups:
 ```
 
 Each group supports `name` (required), `position`, `group_weight` (percent, used when `apply_assignment_group_weights` is `true`), `drop_lowest`, and `drop_highest`.
+
+### Group sets
+
+The optional top-level `group_sets` list is synchronized after the assignment groups, before modules. Missing group sets are created by name; existing ones are updated when `self_signup` or `group_limit` differ. With `groups: N`, empty groups named "<set name> 1", "<set name> 2", … are added until the set has at least N groups, so students can join them. Group sets, groups and memberships are never deleted, and students' memberships are never changed.
+
+```yaml
+group_sets:
+  - name: Project Pairs
+    self_signup: true   # students join a group themselves (People → Groups)
+    group_limit: 2      # at most two students per group
+    groups: 20          # create empty groups up to this many
+```
+
+Point assignments at a set with the item key `group_set`. Canvas refuses to change an assignment's group set once students have submitted, so set it up before the assignment opens.
 
 ### Rubrics
 
