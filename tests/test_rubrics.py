@@ -114,7 +114,7 @@ def test_rubric_payload_nested_encoding() -> None:
     )
 
     assert params["rubric[title]"] == "Project Report Rubric"
-    assert params["rubric[free_form_criterion_comments]"] is True
+    assert params["rubric[free_form_criterion_comments]"] == "1"
     assert params["rubric[criteria][0][description]"] == "Technical content"
     assert params["rubric[criteria][0][points]"] == 10
     assert params["rubric[criteria][0][ratings][1][points]"] == 5
@@ -232,8 +232,8 @@ def test_create_rubric_with_association(
             "association_type": "Assignment",
             "association_id": 55,
             "purpose": "grading",
-            "use_for_grading": True,
-            "hide_score_total": False,
+            "use_for_grading": "1",
+            "hide_score_total": "0",
         },
     )
     course.create_rubric_association.assert_not_called()
@@ -264,8 +264,8 @@ def test_associate_existing_rubric(
             "association_type": "Assignment",
             "association_id": 55,
             "purpose": "grading",
-            "use_for_grading": True,
-            "hide_score_total": False,
+            "use_for_grading": "1",
+            "hide_score_total": "0",
         }
     )
 
