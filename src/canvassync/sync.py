@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 from canvasapi import Canvas
 from canvasapi.assignment import Assignment, AssignmentGroup
 from canvasapi.course import Course
+from canvasapi.discussion_topic import DiscussionTopic
 from canvasapi.exceptions import BadRequest, ResourceDoesNotExist
 from canvasapi.file import File
 from canvasapi.folder import Folder
@@ -149,7 +150,13 @@ def list_differs(value: list[Any], current: list[Any] | None) -> bool:
 
 
 ItemType = Literal[
-    "Page", "ExternalUrl", "SubHeader", "File", "Assignment", "Quiz"
+    "Page",
+    "ExternalUrl",
+    "SubHeader",
+    "File",
+    "Assignment",
+    "Quiz",
+    "Discussion",
 ]
 
 
@@ -168,6 +175,9 @@ def item_type(item: ModuleItemConfig) -> ItemType:
 
     if "quiz" in item:
         return "Quiz"
+
+    if "discussion" in item:
+        return "Discussion"
 
     if "assignment" in item:
         return "Assignment"
@@ -1243,6 +1253,10 @@ class CanvasSync:
             quiz = self.sync_quiz_item(item)
 
             attrs["content_id"] = quiz.id
+        elif the_type == "Discussion":
+            topic = self.sync_discussion_item(item)
+
+            attrs["content_id"] = topic.id
         else:
             raise ValueError(f"Can't create item type {the_type:}")
 
@@ -1345,6 +1359,11 @@ class CanvasSync:
 
             # The quiz was replaced, so the module item must be re-created
             if course_item.content_id != quiz.id:
+                return False
+        elif the_type == "Discussion":
+            topic = self.sync_discussion_item(item)
+
+            if course_item.content_id != topic.id:
                 return False
         else:
             raise ValueError(f"Can't handle item type {the_type:}")
@@ -1570,6 +1589,94 @@ class CanvasSync:
             self.course.create_rubric_association(
                 rubric_association={"rubric_id": rubric.id, **association}
             )
+
+    def get_discussion_by_title(self, title: str) -> DiscussionTopic | None:
+        """Find a course discussion topic with exactly this title."""
+        for topic in self.course.get_discussion_topics(search_term=title):
+            if topic.title == title:
+                return topic
+
+        return None
+
+    def sync_discussion_item(self, item: ModuleItemConfig) -> DiscussionTopic:
+        """Synchronize a discussion topic from a Markdown prompt.
+
+        The topic is found by title (the item title) and created if missing.
+        Its message (the rendered ``discussion:`` file) and settings are
+        updated when they differ. Students' replies are never touched.
+
+        Item keys: ``discussion`` (Markdown file), ``discussion_type``
+        (``threaded``, the default, or ``side_comment``), ``unlock_at``
+        (posted at), ``lock_at`` (closed for replies), ``pinned``,
+        ``require_initial_post`` and ``published``.
+
+        Args:
+            item (ModuleItemConfig): Discussion module item.
+
+        Returns:
+            DiscussionTopic: The Canvas discussion topic.
+        """
+        title = item["title"]
+        html = self.render_markdown(
+            Path(item["discussion"]), template_vars=item.get("vars")
+        )
+
+        settings: ConfigDict = {
+            "discussion_type": item.get("discussion_type", "threaded"),
+            "published": bool(item.get("published", False)),
+        }
+        for flag in ["pinned", "require_initial_post"]:
+            if flag in item:
+                settings[flag] = bool(item[flag])
+
+        dates = {"delayed_post_at": "unlock_at", "lock_at": "lock_at"}
+
+        topic = self.get_discussion_by_title(title)
+
+        if topic is None:
+            logging.debug("Creating discussion '%s'", title)
+            create: ConfigDict = {
+                k: canvas_bool(v) if isinstance(v, bool) else v
+                for k, v in settings.items()
+            }
+            for canvas_attr, item_attr in dates.items():
+                if item_attr in item:
+                    create[canvas_attr] = parse_datetime(
+                        item[item_attr]
+                    ).isoformat()
+
+            return cast(
+                DiscussionTopic,
+                self.course.create_discussion_topic(
+                    title=title, message=html, **create
+                ),
+            )
+
+        changes: ConfigDict = {}
+
+        current = getattr(topic, "message", None)
+        if current is None or not html_equiv(current, html):
+            changes["message"] = html
+
+        for attr, value in settings.items():
+            if getattr(topic, attr, None) != value:
+                changes[attr] = (
+                    canvas_bool(value) if isinstance(value, bool) else value
+                )
+
+        for canvas_attr, item_attr in dates.items():
+            if item_attr in item and date_differs(
+                item[item_attr], getattr(topic, canvas_attr, None)
+            ):
+                changes[canvas_attr] = parse_datetime(
+                    item[item_attr]
+                ).isoformat()
+
+        if changes:
+            logging.debug("Updating discussion '%s'", title)
+            topic.update(**changes)
+
+        return topic
 
     def get_quiz_by_title(self, title: str) -> Quiz | None:
         """Find a course quiz with exactly this title."""
