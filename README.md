@@ -87,7 +87,7 @@ Note the following:
 - Assignments referenced with `assignment:` must already exist in Canvas unless `--create-assignments` (or `create_assignments: true`) is given.
 - `sync --replace-quizzes` deletes and re-imports changed quizzes that have no student submissions.
 - Assignment groups are created and updated, but never deleted.
-- Local files referenced with `file:`, `page:`, `description:`, `rubric:`, `quiz:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
+- Local files referenced with `file:`, `page:`, `description:`, `rubric:`, `quiz:`, `discussion:`, or `syllabus:` are resolved relative to the config file directory unless `--root` is provided.
 - Run `sync --limit TEXT` first when testing changes to one module.
 
 ### Canvas API access token
@@ -320,6 +320,23 @@ On sync, CanvasSync looks for a course quiz with exactly the item's title:
 - If there is none, it imports the zip with a Canvas content migration (`qti_converter`), waits for the import to finish, and applies the title and settings to the new quiz. It also stores a sha256 of the zip in a hidden `<p data-canvassync-sha256="...">` element at the end of the quiz description.
 - If the quiz exists, only settings that differ are updated. The quiz questions are not changed.
 - With `sync --replace-quizzes`, a quiz whose stored sha256 differs from the zip (or that has no stored sha256) is deleted and re-imported, and its module item is re-created to point at the new quiz. A quiz with student submissions is never replaced; CanvasSync prints a warning and keeps it.
+
+### Discussions
+
+A module item with `discussion:` (a Markdown file, rendered like a page) is a Canvas discussion topic,
+found by its item title and created if it doesn't exist. Its prompt and settings are updated when they
+differ; students' replies are never touched.
+
+```yaml
+- title: "Find a Project Partner"
+  published: true
+  discussion: discussions/find-a-partner.md
+  discussion_type: threaded   # default; or side_comment
+  unlock_at: "1/4/2027 12:00am"   # posted at (optional)
+  lock_at: "1/17/2027 11:59pm"    # closed for replies (optional)
+  pinned: true                    # optional
+  require_initial_post: false     # optional: students must post before seeing replies
+```
 
 ### Testing in a sandbox course
 
