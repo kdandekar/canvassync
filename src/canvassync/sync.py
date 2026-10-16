@@ -26,6 +26,7 @@ from canvasapi.course import Course
 from canvasapi.exceptions import BadRequest, ResourceDoesNotExist
 from canvasapi.file import File
 from canvasapi.folder import Folder
+from canvasapi.group import GroupCategory
 from canvasapi.module import Module, ModuleItem
 from canvasapi.page import Page
 from canvasapi.quiz import Quiz
@@ -414,6 +415,9 @@ class CanvasSync:
     _assignment_groups: dict[str, AssignmentGroup] | None = None
     """Cached assignment groups, by name."""
 
+    _group_categories: dict[str, GroupCategory] | None = None
+    """Cached group sets (Canvas group categories), by name."""
+
     create_assignments: bool = False
     """Create assignments that do not exist in Canvas."""
 
@@ -601,6 +605,91 @@ class CanvasSync:
             elif attrs:
                 logging.debug("Updating assignment group '%s'", name)
                 group.edit(**attrs)
+
+    @property
+    def group_categories(self) -> dict[str, GroupCategory]:
+        """Course group sets (group categories), by name (cached)."""
+        if self._group_categories is None:
+            self._group_categories = {
+                category.name: category
+                for category in self.course.get_group_categories()
+            }
+
+        return self._group_categories
+
+    def get_group_category_id(self, name: str) -> int:
+        """Resolve a group set name to its Canvas group category ID."""
+        category = self.group_categories.get(name)
+
+        if category is None:
+            print(
+                f"[red]Cannot find group set {name:}[/red]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        return cast(int, category.id)
+
+    def sync_group_sets(self) -> None:
+        """Synchronize group sets (Canvas group categories).
+
+        Each entry of the optional top-level ``group_sets`` list names a group
+        set. Missing sets are created; existing sets are updated when
+        ``self_signup`` or ``group_limit`` differ. If ``groups`` is given,
+        empty groups named "<set name> <n>" are added until the set has at
+        least that many groups, so students can join them (self sign-up).
+        Group sets, groups and memberships are never deleted or otherwise
+        changed.
+        """
+        sets = cast(list[ConfigDict], self.config.get("group_sets", []))
+
+        for set_config in sets:
+            name = set_config["name"]
+            category = self.group_categories.get(name)
+
+            attrs: ConfigDict = {}
+
+            if "self_signup" in set_config:
+                signup = "enabled" if set_config["self_signup"] else None
+
+                current = getattr(category, "self_signup", None)
+
+                if category is None or current != signup:
+                    attrs["self_signup"] = signup
+
+            if "group_limit" in set_config:
+                limit = set_config["group_limit"]
+
+                current = getattr(category, "group_limit", None)
+
+                if category is None or current != limit:
+                    attrs["group_limit"] = limit
+
+            if category is None:
+                logging.debug("Creating group set '%s'", name)
+                category = self.course.create_group_category(name, **attrs)
+                self.group_categories[name] = category
+            elif attrs:
+                logging.debug("Updating group set '%s'", name)
+                category.update(**attrs)
+
+            wanted = int(set_config.get("groups", 0))
+
+            if wanted:
+                existing = list(category.get_groups())
+                names = {group.name for group in existing}
+                n, count = 1, len(existing)
+
+                while count < wanted:
+                    group_name = f"{name} {n}"
+                    n += 1
+
+                    if group_name in names:
+                        continue
+
+                    logging.debug("Creating group '%s'", group_name)
+                    category.create_group(name=group_name)
+                    count += 1
 
     def sync_assignment_group_rules(self) -> None:
         """Apply the configured drop rules to existing assignment groups."""
@@ -928,6 +1017,7 @@ class CanvasSync:
         self._synced_quizzes = {}
 
         self.sync_assignment_groups()
+        self.sync_group_sets()
 
         self.sync_syllabus(self.course)
 
@@ -1280,6 +1370,19 @@ class CanvasSync:
 
             if differs("assignment_group_id", group_id):
                 attrs["assignment_group_id"] = group_id
+
+        if "group_set" in item:
+            category_id = self.get_group_category_id(item["group_set"])
+
+            if differs("group_category_id", category_id):
+                attrs["group_category_id"] = category_id
+
+            individually = bool(
+                item.get("grade_group_students_individually", False)
+            )
+
+            if differs("grade_group_students_individually", individually):
+                attrs["grade_group_students_individually"] = individually
 
         if "peer_reviews" in item:
             peer_reviews = cast(ConfigDict, item["peer_reviews"] or {})
