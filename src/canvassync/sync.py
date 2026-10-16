@@ -1232,6 +1232,7 @@ class CanvasSync:
         elif the_type == "File":
             filepath: Path = self.root / Path(item["file"])
             _, file = self.upload_file(filepath)
+            self.set_file_published(file, item.get("published", False))
 
             attrs["content_id"] = file.id
         elif the_type == "Assignment":
@@ -1253,6 +1254,26 @@ class CanvasSync:
         )
 
         return course_item
+
+    def set_file_published(self, file: File, published: bool) -> None:
+        """Publish or unpublish a course file.
+
+        An unpublished file is locked, so students can neither see it in a
+        module nor open it by its link. ("Hidden" alone only removes it from
+        the Files list; anyone with the link can still open it.)
+        """
+        locked = not published
+
+        if (
+            getattr(file, "locked", None) != locked
+            or getattr(file, "hidden", None) is not False
+        ):
+            logging.debug(
+                "%s file '%s'",
+                "Publishing" if published else "Unpublishing",
+                file.filename,
+            )
+            file.update(locked=locked, hidden=False)
 
     def sync_module_item(
         self,
@@ -1311,7 +1332,7 @@ class CanvasSync:
             else:
                 _, file = self.upload_file(filepath)
 
-                file.update(hidden=not item.get("published", False))
+                self.set_file_published(file, item.get("published", False))
 
                 if course_item.content_id != file.id:
                     return False
@@ -1330,7 +1351,8 @@ class CanvasSync:
 
         logging.debug("Updating %s '%s'", course_item.type, item["title"])
 
-        # We can't unpublish a file
+        # A file module item follows its file's published state (see
+        # set_file_published); it can't be unpublished directly.
         if the_type != "File":
             attrs["published"] = item.get("published", False)
 
