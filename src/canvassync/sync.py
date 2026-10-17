@@ -1262,10 +1262,13 @@ class CanvasSync:
 
         course_item = course_module.create_module_item(module_item=attrs)
 
-        # We must set the published flag after item creation
-        course_item.edit(
-            module_item={"published": item.get("published", False)}
-        )
+        # We must set the published flag after item creation. A file module
+        # item follows its file's published state (see set_file_published) and
+        # Canvas refuses to unpublish it directly ("item can't be unpublished"),
+        # which used to abort the sync before later files were locked.
+        published = item.get("published", False)
+        if published or the_type != "File":
+            course_item.edit(module_item={"published": published})
 
         return course_item
 

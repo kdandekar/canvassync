@@ -76,6 +76,39 @@ def test_new_unpublished_file_item_is_locked(
     file.update.assert_called_once_with(locked=True, hidden=False)
 
 
+@pytest.mark.parametrize("published", [True, False])
+def test_new_file_item_is_never_unpublished_directly(
+    make_sync: MakeSync, course: MagicMock, tmp_path: Path, published: bool
+) -> None:
+    # Canvas answers "item can't be unpublished" for a file module item, which
+    # aborted the sync and left later solution files unlocked.
+    (tmp_path / "solutions.pdf").write_bytes(b"%PDF")
+    file = canvas_file(
+        id=5, filename="solutions.pdf", locked=published, hidden=False
+    )
+    sync = make_sync(course=course)
+    sync.upload_file = MagicMock(return_value=(True, file))  # type: ignore[method-assign]
+    module = MagicMock()
+    created = obj(id=1)
+    module.create_module_item.return_value = created
+
+    sync.create_module_item(
+        module,
+        {
+            "title": "Worked Solutions",
+            "file": "solutions.pdf",
+            "published": published,
+            "indent": 0,
+        },
+        0,
+    )
+
+    if published:
+        created.edit.assert_called_once_with(module_item={"published": True})
+    else:
+        created.edit.assert_not_called()
+
+
 def test_existing_file_item_is_unpublished_on_sync(
     make_sync: MakeSync, course: MagicMock, tmp_path: Path
 ) -> None:
